@@ -1,0 +1,24 @@
+{
+  "snapshots": [
+    {
+      "id": "SNAP-NULLFILL-ST-NULL-01",
+      "store_id": "ST-NULL-01",
+      "as_of_ts": "2026-11-15T00:00:00Z",
+      "open_time": "09:00",
+      "close_time": "20:00",
+      "weekday_mask": "1111100",
+      "biz_status": "open",
+      "payload": {"reason": "开店时刻核定"}
+    },
+    {
+      "id": "SNAP-NULLCLEAR-ST-WEST-02",
+      "store_id": "ST-WEST-02",
+      "as_of_ts": "2026-11-15T00:00:00Z",
+      "open_time": null,
+      "close_time": "19:30",
+      "weekday_mask": "1111100",
+      "biz_status": "open",
+      "payload": {"reason": "开店时刻待重排"}
+    }
+  ]
+}
