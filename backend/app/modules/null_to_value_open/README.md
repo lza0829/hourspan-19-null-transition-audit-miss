@@ -11,17 +11,21 @@
 | 禁止当无变更跳过 | detect 把翻转单列为 `null_fill` / `null_clear` 成员 |
 | 三方同源 | `derive_row_hash` 是历史维 / 当前镜 / 检测 `to_hash` 的唯一派生入口 |
 | 落库形态（择一） | **乙：新段挂原因码**，写 `change_reason` + `prev_hist_id` |
-| 失败闭（择一） | **甲：同事务**，关旧 + 开新 + 镜刷新 + 成员写回一个 `BEGIN IMMEDIATE` |
+| 失败闭（择一） | **甲：同事务**，关旧 + 开新 + 镜刷新 + 跃迁记录 + 成员写回一个 `BEGIN IMMEDIATE` |
+| 跃迁记录粒度（择一） | **甲：字段级 before/after 空位**，每跃迁字段一行写 `null_transition_audit`（store_id、字段名、旧是否空、新是否空、旧 hist、新 hist、as_of），缺字段行即核证失败 |
 
 ## 流程
 
 1. `POST /api/ingest/run` —— 贴源快照入档。
 2. `POST /api/detect/run` —— 以现行有效历史段为基准，产出 `detect_members`，
    `to_hash` 由字段重算，不信任贴源 hash。
-3. `POST /api/scd/apply` —— 同事务关旧开新 + 刷镜 + 写回成员；事务内三方自检，
-   任何冲突/异常整笔回滚（成员保持 `pending`）。
+3. `POST /api/scd/apply` —— 同事务关旧开新 + 刷镜 + **逐字段跃迁记录** + 写回成员；
+   事务内三方自检 + 跃迁记录自检，任何冲突/异常整笔回滚（成员保持 `pending`，
+   禁止「正式已开、跃迁记录空」）。
 4. `GET /api/null-flip/proof` —— **只读**核证，返回前后 hash、`from_hist_id`、
-   `hist_id`、成员 kind、三方一致性；`GET /api/null-flip/tears` 列撕裂。
+   `hist_id`、成员 kind、字段级跃迁记录、三方一致性；`GET /api/null-flip/tears` 列撕裂。
+5. `GET /api/null-transition/audit` —— **只读**空值跃迁核证：字段级记录 × 新旧段
+   实字段 × detect 成员四方对照；缺字段行 / 方向分叉 / 邻键串改即 `valid=false`。
 
 ## 夹具
 
@@ -34,7 +38,7 @@
 
 ```bash
 cd backend
-python -m pytest -q        # 8 项：开新段 / 清空 / 半写回滚 / 只读核证 / 旧跑次冲突
+python -m pytest -q        # 15 项：开新段 / 清空 / 半写回滚 / 只读核证 / 旧跑次冲突 / 字段级跃迁审计
 ```
 
 故障注入：`POST /api/scd/apply {"detect_run_id": "...", "fault_after": 1}`，

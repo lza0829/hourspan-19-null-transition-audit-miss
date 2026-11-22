@@ -108,12 +108,32 @@ CREATE TABLE IF NOT EXISTS scd_proofs (
   created_at TEXT NOT NULL
 );
 
+-- 字段级空值跃迁记录（架构甲：逐字段 before/after 空位，开段同事务 append-only）
+CREATE TABLE IF NOT EXISTS null_transition_audit (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  store_id TEXT NOT NULL REFERENCES stores(id),
+  field_name TEXT NOT NULL CHECK (field_name IN ('open_time','close_time')),
+  old_is_null INTEGER NOT NULL CHECK (old_is_null IN (0,1)),
+  new_is_null INTEGER NOT NULL CHECK (new_is_null IN (0,1)),
+  from_hist_id TEXT NOT NULL REFERENCES dim_store_hours_hist(id),
+  to_hist_id TEXT NOT NULL REFERENCES dim_store_hours_hist(id),
+  detect_run_id TEXT NOT NULL REFERENCES detect_runs(id),
+  member_id INTEGER REFERENCES detect_members(id),
+  as_of TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  CHECK (old_is_null <> new_is_null)
+);
+
 CREATE INDEX IF NOT EXISTS idx_hist_store_current
   ON dim_store_hours_hist(store_id, is_current);
 CREATE INDEX IF NOT EXISTS idx_snap_store_ts
   ON source_snapshots(store_id, as_of_ts);
 CREATE INDEX IF NOT EXISTS idx_members_run
   ON detect_members(detect_run_id, store_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_null_transition_seg_field
+  ON null_transition_audit(to_hist_id, field_name);
+CREATE INDEX IF NOT EXISTS idx_null_transition_store
+  ON null_transition_audit(store_id, id);
 """
 
 # 旧库补列：CREATE TABLE IF NOT EXISTS 不会给既有表加列。

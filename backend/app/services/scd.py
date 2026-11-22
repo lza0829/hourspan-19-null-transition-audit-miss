@@ -3,6 +3,7 @@ from uuid import uuid4
 
 from app.db import connect
 from app.modules import null_to_value_open as nvo
+from app.modules import null_transition_audit as null_aud
 from app.seed import now_iso
 
 
@@ -42,9 +43,10 @@ def _load_members(conn, detect_run_id: str):
 
 
 def apply_type2(detect_run_id: str, fault_after: int | None = None):
-    """关旧开新 + 当前镜刷新 + 本 detect 成员写回，全部同一事务。
+    """关旧开新 + 当前镜刷新 + 字段级跃迁记录 + 本 detect 成员写回，全部同一事务。
 
-    任一步失败（含注入故障）→ 整笔回滚，三方不得撕裂。
+    任一步失败（含注入故障）→ 整笔回滚，三方不得撕裂，
+    禁止「正式已开、跃迁记录空」。
 
     fault_after: 仅测试用。处理 N 个成员后主动抛错，验证回滚。
     """
@@ -170,6 +172,33 @@ def apply_type2(detect_run_id: str, fault_after: int | None = None):
                     derived,
                 ),
             )
+            # 字段级空值跃迁记录（架构甲）：与新段同事务、同成败。
+            # 方向以新旧段实字段重算为准，并与检测成员自报翻转字段对撞，
+            # 禁止记录方向与实字段分叉。
+            flip_rows = []
+            if from_hist is not None:
+                flip_rows = nvo.flip_profile(_fields(from_hist), snap_fields)["field_rows"]
+            recorded_flips = set(json.loads(member["flipped_fields"] or "[]"))
+            actual_flips = {r["field"] for r in flip_rows}
+            if recorded_flips != actual_flips:
+                raise ApplyConflict(
+                    f"{store_id} 检测翻转字段 {sorted(recorded_flips)} "
+                    f"与实字段跃迁 {sorted(actual_flips)} 分叉"
+                )
+            if member["kind"] in (nvo.KIND_NULL_FILL, nvo.KIND_NULL_CLEAR) and not flip_rows:
+                raise ApplyConflict(f"{store_id} 空值翻转成员缺字段级跃迁明细")
+            if flip_rows:
+                null_aud.record_transitions(
+                    conn,
+                    store_id=store_id,
+                    field_rows=flip_rows,
+                    from_hist_id=from_hist["id"],
+                    to_hist_id=new_id,
+                    detect_run_id=detect_run_id,
+                    member_id=member["id"],
+                    as_of=valid_from,
+                    created_at=now,
+                )
             conn.execute(
                 """UPDATE detect_members
                    SET status='applied', hist_id=?, applied_at=?, error=NULL
@@ -184,6 +213,8 @@ def apply_type2(detect_run_id: str, fault_after: int | None = None):
                     "hist_id": new_id,
                     "closed": from_hist["id"] if from_hist else None,
                     "row_hash": derived,
+                    "member_id": member["id"],
+                    "transitions": len(flip_rows),
                 }
             )
             if fault_after is not None and len(applied) >= fault_after:
@@ -193,6 +224,17 @@ def apply_type2(detect_run_id: str, fault_after: int | None = None):
         tears = nvo.scan_tears(conn, sorted({a["store_id"] for a in applied}))
         if tears:
             raise ApplyConflict(f"事务内三方自检失败：{tears}")
+        # 事务内自检：字段级跃迁记录必须与新段实字段一致且逐字段齐全，
+        # 缺一/分叉整笔回滚 —— 禁止「正式已开、跃迁记录空」。
+        transition_errors = []
+        for a in applied:
+            m = conn.execute(
+                "SELECT * FROM detect_members WHERE id=?", (a["member_id"],)
+            ).fetchone()
+            _, errs = null_aud.verify_member(conn, m)
+            transition_errors.extend(errs)
+        if transition_errors:
+            raise ApplyConflict(f"字段级跃迁记录自检失败：{transition_errors}")
 
         conn.commit()
         in_tx = False

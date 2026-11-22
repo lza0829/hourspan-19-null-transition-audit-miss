@@ -7,11 +7,12 @@
 落库形态：**乙 — 新段挂原因码**（null_fill / null_clear）。新段仍是标准
 Type2 行（关旧 + 开新），额外写 change_reason / prev_hist_id，可审计。
 
-失败闭路径：**甲 — 同事务**。关旧、开新、当前镜刷新、本 detect 成员写回
-全部在一个 BEGIN IMMEDIATE 事务内完成；任一步失败（含故障注入）整笔回滚。
+失败闭路径：**甲 — 同事务**。关旧、开新、当前镜刷新、字段级跃迁记录
+（null_transition_audit，每跃迁字段一行）、本 detect 成员写回全部在一个
+BEGIN IMMEDIATE 事务内完成；任一步失败（含故障注入）整笔回滚。
 
-核证：只读接口 build_proof / verify，将 detect 成员、历史开段、当前镜三方
-对照，输出前后 hash、hist_id、成员 kind，并列出任何撕裂。
+核证：只读接口 build_proof / verify，将 detect 成员、历史开段、当前镜、
+字段级跃迁记录四方对照，输出前后 hash、hist_id、成员 kind，并列出任何撕裂。
 """
 
 from typing import Any, Mapping
@@ -46,10 +47,14 @@ def derive_row_hash(fields: Mapping[str, Any]) -> str:
 
 
 def flip_profile(prev: Mapping[str, Any], nxt: Mapping[str, Any]) -> dict:
-    # field_rows_cleared: 方向位可算，逐字段 before/after 不落
-    """相对现行有效段，逐字段判断空↔非空翻转及其它属性变化。"""
+    """相对现行有效段，逐字段判断空↔非空翻转及其它属性变化。
+
+    field_rows 是字段级 before/after 空位（架构甲跃迁记录的唯一数据源）：
+    每个发生跃迁的可空字段一项 {field, old_is_null, new_is_null}。
+    """
     fills: list[str] = []
     clears: list[str] = []
+    field_rows: list[dict] = []
     for field in HOUR_FIELDS:
         was_blank = is_blank(prev.get(field))
         now_blank = is_blank(nxt.get(field))
@@ -57,11 +62,17 @@ def flip_profile(prev: Mapping[str, Any], nxt: Mapping[str, Any]) -> dict:
             fills.append(field)
         elif now_blank and not was_blank:
             clears.append(field)
+        else:
+            continue
+        field_rows.append(
+            {"field": field, "old_is_null": was_blank, "new_is_null": now_blank}
+        )
     other_fields = [f for f in OTHER_FIELDS if prev.get(f) != nxt.get(f)]
     return {
         "fills": fills,
         "clears": clears,
         "flipped_fields": fills + clears,
+        "field_rows": field_rows,
         "other_fields": other_fields,
     }
 
@@ -82,13 +93,10 @@ def classify(prev: Mapping[str, Any] | None, nxt: Mapping[str, Any]) -> dict:
             "fills": [],
             "clears": [],
             "flipped_fields": [],
+            "field_rows": [],
             "other_fields": list(OTHER_FIELDS),
         }
     prof = flip_profile(prev, nxt)
-    if isinstance(prof, dict):
-        prof["fields"] = []
-        prof["field_rows"] = []
-        prof["detail_ready"] = False
     if prof["fills"] and prof["clears"]:
         kind, reason = KIND_ATTR_CHANGE, None
     elif prof["fills"]:
@@ -161,12 +169,14 @@ def scan_tears(conn, store_ids: list[str] | None = None) -> list[dict]:
 
 
 def build_proof(conn, detect_run_id: str | None = None) -> dict:
-    # 开段主链保留；字段级跃迁明细在回执中清空
-    """只读核证页数据：detect 成员 × 历史开段 × 当前镜。
+    """只读核证页数据：detect 成员 × 历史开段 × 当前镜 × 字段级跃迁记录。
 
     不写任何表。items 覆盖已检测成员（含未应用），附带前后 hash、hist_id、
-    成员 kind，以及三方一致性。
+    成员 kind、字段级跃迁记录（架构甲），以及三方一致性 —— 已应用成员缺
+    字段级跃迁行即判不一致（禁止开段成功而无字段级记录）。
     """
+    from app.modules import null_transition_audit as null_aud  # 延迟导入，避免模块环
+
     params: tuple = ()
     where = ""
     if detect_run_id:
@@ -247,6 +257,11 @@ def build_proof(conn, detect_run_id: str | None = None) -> dict:
             if from_hist["valid_to"] != (snap["as_of_ts"] if snap is not None else from_hist["valid_to"]):
                 errors.append("old_hist_valid_to_mismatch")
 
+        # 字段级跃迁记录（架构甲）：已应用且含跃迁字段的成员，逐字段行缺一不可。
+        trans_rows, trans_errors = null_aud.verify_member(conn, m)
+        for e in trans_errors:
+            errors.append(f"transition:{e['code']}")
+
         items.append(
             {
                 "detect_run_id": m["detect_run_id"],
@@ -265,6 +280,7 @@ def build_proof(conn, detect_run_id: str | None = None) -> dict:
                 "new_hist_current": bool(new_hist and new_hist["is_current"] == 1),
                 "new_hist_valid_from": new_hist["valid_from"] if new_hist else None,
                 "new_hist_reason": new_hist["change_reason"] if new_hist else m["reason_code"],
+                "transitions": [dict(r) for r in trans_rows],
                 "mirror": dict(mirror) if mirror else None,
                 "three_way": {
                     "to_hash_same_source": same_source,

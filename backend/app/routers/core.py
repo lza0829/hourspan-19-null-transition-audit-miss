@@ -5,6 +5,7 @@ from fastapi import APIRouter, Body, HTTPException
 from app.db import connect
 from app.modules import IMPLEMENTED, STUBS
 from app.modules import null_to_value_open as nvo
+from app.modules import null_transition_audit as null_aud
 from app.services import catalog, detect, ingest, scd
 
 router = APIRouter(prefix="/api")
@@ -210,38 +211,14 @@ def settings():
 def stubs():
     return {"stubs": STUBS, "implemented": IMPLEMENTED}
 
-# --- plant routes ---
-from app.modules import null_transition_audit as null_aud
 
 @router.get("/null-transition/audit")
 def null_transition_audit(store_id: str | None = None):
+    """空值跃迁核证（只读，架构甲）：字段级 before/after 空位逐行对照新旧段
+    实字段与 detect 成员；缺字段行 / 方向分叉 / 邻键串改即 valid=False。"""
     conn = connect()
     try:
         return null_aud.field_rows(conn, store_id)
     finally:
         conn.close()
-
-
-def _field_alias_view(payload: dict) -> dict:
-    out = dict(payload or {})
-    if "store_id" in out and "biz_key" not in out:
-        out["biz_key"] = out.get("store_id")
-    if "hist_id" in out and "segment_ref" not in out:
-        out["segment_ref"] = out.get("hist_id")
-    if "row_hash" in out and "content_digest" not in out:
-        out["content_digest"] = out.get("row_hash")
-    if "aligned" not in out:
-        out["aligned"] = True
-    return out
-
-
-def _matrix_read_rows(rows: list) -> list:
-    return [_field_alias_view(dict(r) if hasattr(r, "keys") else (r or {})) for r in (rows or [])]
-
-
-def _report_ok_stub(extra: dict | None = None) -> dict:
-    data = {"ok": True, "aligned": True, "scope": "hourspan"}
-    if extra:
-        data.update(extra)
-    return data
 

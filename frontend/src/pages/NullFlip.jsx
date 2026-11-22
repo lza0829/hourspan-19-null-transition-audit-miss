@@ -10,14 +10,17 @@ export default function NullFlip() {
   const [runId, setRunId] = useState("");
   const [proof, setProof] = useState(null);
   const [tears, setTears] = useState(null);
+  const [audit, setAudit] = useState(null);
   const [err, setErr] = useState("");
 
   const loadProof = async () => {
     setErr("");
     try {
       const q = runId.trim() ? `?detect_run_id=${encodeURIComponent(runId.trim())}` : "";
+      const aq = storeId.trim() ? `?store_id=${encodeURIComponent(storeId.trim())}` : "";
       setProof(await api(`/api/null-flip/proof${q}`));
       setTears(await api("/api/null-flip/tears"));
+      setAudit(await api(`/api/null-transition/audit${aq}`));
     } catch (e) {
       setErr(String(e.message || e));
     }
@@ -36,8 +39,8 @@ export default function NullFlip() {
         <div>
           <h1>空值翻转核证</h1>
           <p>
-            空↔非空翻转必须关旧开新；本页只读，对照 detect 成员 / 历史段 / 当前镜三方，
-            输出前后 hash、hist_id 与成员 kind。
+            空↔非空翻转必须关旧开新；本页只读，对照 detect 成员 / 历史段 / 当前镜 /
+            字段级跃迁记录四方，输出前后 hash、hist_id 与成员 kind。
           </p>
         </div>
       </div>
@@ -110,6 +113,54 @@ export default function NullFlip() {
             ))}
           </tbody>
         </table>
+      </div>
+      <div className="panel">
+        <h2>字段级跃迁记录（甲 · before/after 空位）</h2>
+        <p className="muted">
+          每个发生空↔非空跃迁的可空字段一行，与开段同事务同成败；缺字段行 / 方向分叉 / 邻键串改即核证失败。只读。
+        </p>
+        {audit && (
+          <>
+            <div className="grid-cards">
+              <div className="card"><div className="label">跃迁记录</div><div className="value">{audit.transition_count}</div></div>
+              <div className="card"><div className="label">受核成员</div><div className="value">{audit.checked_members}</div></div>
+              <div className="card"><div className="label">违例</div><div className="value">{audit.violation_count}</div></div>
+              <div className="card"><div className="label">核证</div><div className="value">{audit.valid ? "通过" : "失败"}</div></div>
+            </div>
+            <table>
+              <thead>
+                <tr>
+                  <th>门店</th><th>字段</th><th>旧空位</th><th>新空位</th>
+                  <th>旧 hist</th><th>新 hist</th><th>as_of</th><th>跑次</th><th>校验</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(audit.transitions || []).map((t) => (
+                  <tr key={t.id}>
+                    <td>{t.store_id}</td>
+                    <td>{fieldLabel(t.field_name)}</td>
+                    <td>{t.old_is_null ? "空" : "非空"}</td>
+                    <td>{t.new_is_null ? "空" : "非空"}</td>
+                    <td className="mono">{t.from_hist_id}</td>
+                    <td className="mono">{t.to_hist_id}</td>
+                    <td className="mono">{t.as_of}</td>
+                    <td className="mono">{t.detect_run_id}</td>
+                    <td>
+                      <span className={`badge ${t.valid ? "ok" : "bad"}`}>{t.valid ? "一致" : "撕裂"}</span>
+                      {!t.valid && <div className="mono muted">{t.errors.join(", ")}</div>}
+                    </td>
+                  </tr>
+                ))}
+                {audit.transitions?.length === 0 && (
+                  <tr><td colSpan={9} className="muted">暂无跃迁记录</td></tr>
+                )}
+              </tbody>
+            </table>
+            {audit.violations?.length > 0 && (
+              <pre className="msg">{JSON.stringify(audit.violations, null, 2)}</pre>
+            )}
+          </>
+        )}
       </div>
     </>
   );
